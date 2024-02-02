@@ -194,7 +194,7 @@ abstract class MMRCMS(
     override fun searchMangaSelector() = "div.media"
 
     override fun searchMangaFromElement(element: Element) = SManga.create().apply {
-        val anchor = element.selectFirst(".media-heading a, .manga-heading a")!!
+        val anchor = element.selectFirst(".media-heading a[href], .manga-heading a[href]")!!
 
         setUrlWithoutDomain(anchor.attr("href"))
         title = anchor.text()

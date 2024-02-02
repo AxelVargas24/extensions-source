@@ -4,17 +4,27 @@ import android.util.Base64
 import eu.kanade.tachiyomi.lib.cryptoaes.CryptoAES
 import eu.kanade.tachiyomi.lib.synchrony.Deobfuscator
 import eu.kanade.tachiyomi.multisrc.mmrcms.MMRCMS
+import eu.kanade.tachiyomi.multisrc.mmrcms.MMRCMSUtils
+import eu.kanade.tachiyomi.multisrc.mmrcms.UriFilter
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SChapter
+import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.util.asJsoup
 import kotlinx.serialization.decodeFromString
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Request
 import okhttp3.Response
+import rx.Observable
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 class MangasIn : MMRCMS("Mangas.in", "https://mangas.in", "es") {
+
+    override val supportsAdvancedSearch = false
 
     override val client = super.client.newBuilder()
         .rateLimitHost(baseUrl.toHttpUrl(), 1, 1)
@@ -22,6 +32,69 @@ class MangasIn : MMRCMS("Mangas.in", "https://mangas.in", "es") {
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
+
+    override fun fetchSearchManga(
+        page: Int,
+        query: String,
+        filters: FilterList,
+    ): Observable<MangasPage> {
+        return client.newCall(searchMangaRequest(page, query, filters))
+            .asObservableSuccess()
+            .map { searchMangaParse(it) }
+    }
+
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/lasted?p=$page", headers)
+
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        val page = response.request.url.queryParameter("p")!!.toInt()
+        val result = json.decodeFromString<MILastedDto>(response.body.string())
+
+        val mangas = result.data.map {
+            SManga.create().apply {
+                title = it.title
+                thumbnail_url = MMRCMSUtils.guessCover(baseUrl, it.slug, null)
+                url = "/$itemPath/${it.slug}"
+            }
+        }
+        val hasNextPage = page < result.totalPages
+        return MangasPage(mangas, hasNextPage)
+    }
+
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val url = baseUrl.toHttpUrl().newBuilder()
+
+        if (query.isNotEmpty()) {
+            url.addPathSegment("search")
+            url.addQueryParameter("q", query)
+        } else {
+            url.addPathSegment("filterList")
+            url.addQueryParameter("page", page.toString())
+            filters.filterIsInstance<UriFilter>()
+                .forEach { it.addToUri(url) }
+        }
+        return GET(url.toString(), headers)
+    }
+
+    override fun searchMangaParse(response: Response): MangasPage {
+        runCatching { fetchFilterOptions() }
+
+        if (response.request.url.queryParameterNames.contains("q")) {
+            val searchResult = json.decodeFromString<List<MISearchResultDto>>(response.body.string())
+            return MangasPage(
+                searchResult
+                    .map {
+                        SManga.create().apply {
+                            url = "/$itemPath/${it.slug}"
+                            title = it.name
+                            thumbnail_url = MMRCMSUtils.guessCover(baseUrl, it.slug, null)
+                        }
+                    },
+                false,
+            )
+        } else {
+            return super.searchMangaParse(response)
+        }
+    }
 
     private var key = ""
 
@@ -52,7 +125,7 @@ class MangasIn : MMRCMS("Mangas.in", "https://mangas.in", "es") {
 
         val unescaped = decrypted.unescapeJava().removeSurrounding("\"").unescape()
 
-        val chapters = json.decodeFromString<List<Chapter>>(unescaped)
+        val chapters = json.decodeFromString<List<MIChapterDto>>(unescaped)
 
         return chapters.map {
             SChapter.create().apply {
